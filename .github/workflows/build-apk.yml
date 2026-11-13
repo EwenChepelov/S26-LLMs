@@ -1,0 +1,67 @@
+name: Build Gallery APK (Exynos 2600)
+
+on:
+  push:
+    branches: [vibe/exynos2600-s26-86b402]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Install Android SDK packages
+        run: |
+          yes | "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null || true
+          "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" \
+            "platform-tools" "platforms;android-36" "platforms;android-37.0" "build-tools;36.0.0"
+
+      - name: Clone gallery and apply Exynos 2600 changes
+        run: |
+          git clone https://github.com/google-ai-edge/gallery.git
+          cd gallery
+          git checkout e26a84b
+          git apply "$GITHUB_WORKSPACE/gallery-exynos2600-changes.diff"
+          cp "$GITHUB_WORKSPACE/libLiteRtDispatch_Samsung.so" \
+            Android/src/app/src/main/jniLibs/arm64-v8a/
+
+      - name: Build debug APK
+        working-directory: gallery/Android/src
+        run: ./gradlew assembleDebug --no-daemon
+
+      - name: Collect APK
+        run: |
+          cp gallery/Android/src/app/build/outputs/apk/debug/app-debug.apk \
+            gallery-exynos2600-debug.apk
+          ls -la gallery-exynos2600-debug.apk
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: gallery-exynos2600-debug
+          path: gallery-exynos2600-debug.apk
+
+      - name: Publish release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v0.1-exynos2600
+          name: Gallery Exynos 2600 (Galaxy S26)
+          body: |
+            APK debug de Google AI Edge Gallery adapté au Galaxy S26 (Exynos 2600 / E9965).
+
+            - Package : com.example.gallery.exynos (sans conflit avec l'app Google)
+            - Repli automatique GPU -> CPU (ticket LiteRT-LM #2114)
+            - CPU par défaut, NPU en option
+            - libLiteRtDispatch_Samsung.so embarquée
+
+            Installation : télécharger le APK, autoriser l'installation de sources inconnues, installer.
+          files: gallery-exynos2600-debug.apk
+          fail_on_unmatched_files: true
