@@ -1,0 +1,171 @@
+diff --git a/Android/src/app/build.gradle.kts b/Android/src/app/build.gradle.kts
+index 35f92b9..5ab6746 100644
+--- a/Android/src/app/build.gradle.kts
++++ b/Android/src/app/build.gradle.kts
+@@ -33,7 +33,7 @@ android {
+   compileSdk { this.version = release(37) { minorApiLevel = 0 } }
+ 
+   defaultConfig {
+-    applicationId = "com.google.aiedge.gallery"
++    applicationId = "com.example.gallery.exynos"
+     minSdk = 31
+     targetSdk = 37
+     versionCode = 53
+diff --git a/Android/src/app/src/main/AndroidManifest.xml b/Android/src/app/src/main/AndroidManifest.xml
+index 6ab7d5c..c3aea47 100644
+--- a/Android/src/app/src/main/AndroidManifest.xml
++++ b/Android/src/app/src/main/AndroidManifest.xml
+@@ -177,6 +177,9 @@
+         <uses-native-library android:name="libedgetpu_litert.so" android:required="false" />
+         <uses-native-library android:name="libedgetpu_util.so" android:required="false"/>
+         <uses-native-library android:name="libedgetpu_client.google.so" android:required="false"/>
++        <!-- Exynos AI LiteCore (Samsung NPU) runtime libraries; optional because only Exynos 2600
++             devices ship them. -->
++        <uses-native-library android:name="libenn_public_api_cpp.so" android:required="false"/>
+     </application>
+ 
+     <!-- Text-to-speech engines and the XR glasses service used by speech and XR Language Teacher. -->
+diff --git a/Android/src/app/src/main/java/com/google/ai/edge/gallery/common/HardwareUtils.kt b/Android/src/app/src/main/java/com/google/ai/edge/gallery/common/HardwareUtils.kt
+index 0a839a3..1fa8f53 100644
+--- a/Android/src/app/src/main/java/com/google/ai/edge/gallery/common/HardwareUtils.kt
++++ b/Android/src/app/src/main/java/com/google/ai/edge/gallery/common/HardwareUtils.kt
+@@ -22,6 +22,24 @@ import java.util.Locale
+ /** Utility object for hardware and device detection. */
+ object HardwareUtils {
+ 
++  /**
++   * Returns true if the device runs a Samsung Exynos 2600 SoC (S5E9965 / E9965, Xclipse 960 GPU),
++   * e.g. the Galaxy S26 Exynos variant.
++   */
++  fun isExynos2600(
++    hardware: String = Build.HARDWARE,
++    board: String = Build.BOARD,
++    socModel: String = Build.SOC_MODEL,
++  ): Boolean {
++    val combined =
++      "${hardware.lowercase(Locale.ROOT)} ${board.lowercase(Locale.ROOT)} " +
++        "${socModel.lowercase(Locale.ROOT)}"
++    return "s5e9965" in combined ||
++      "e9965" in combined ||
++      "exynos2600" in combined ||
++      "exynos 2600" in combined
++  }
++
+   fun isOldMaliGpu(
+     hardware: String = Build.HARDWARE,
+     board: String = Build.BOARD,
+diff --git a/Android/src/app/src/main/java/com/google/ai/edge/gallery/data/ModelAllowlist.kt b/Android/src/app/src/main/java/com/google/ai/edge/gallery/data/ModelAllowlist.kt
+index dc27cfa..35f1fc8 100644
+--- a/Android/src/app/src/main/java/com/google/ai/edge/gallery/data/ModelAllowlist.kt
++++ b/Android/src/app/src/main/java/com/google/ai/edge/gallery/data/ModelAllowlist.kt
+@@ -18,6 +18,7 @@ package com.google.ai.edge.gallery.data
+ 
+ import android.os.Build
+ import android.util.Log
++import com.google.ai.edge.gallery.common.HardwareUtils
+ import com.google.ai.edge.gallery.common.isPixel10
+ import com.google.ai.edge.gallery.common.isPixelDevice
+ import com.google.gson.annotations.SerializedName
+@@ -216,6 +217,18 @@ data class AllowedModel(
+       if (isPixel10() && isLlmModel) {
+         parsedAccelerators.remove(Accelerator.GPU)
+       }
++      // Exynos 2600 (Galaxy S26): the LiteRT-LM GPU backend fails at engine init because Clspv
++      // (ANGLE-CL) rejects an ML Drift kernel (LiteRT-LM issue #2114). Default to CPU and offer
++      // NPU (Exynos AI LiteCore) as an option instead.
++      if (HardwareUtils.isExynos2600() && isLlmModel) {
++        parsedAccelerators.remove(Accelerator.GPU)
++        if (Accelerator.CPU !in parsedAccelerators) {
++          parsedAccelerators.add(0, Accelerator.CPU)
++        }
++        if (Accelerator.NPU !in parsedAccelerators) {
++          parsedAccelerators.add(Accelerator.NPU)
++        }
++      }
+       if (parsedAccelerators.isNotEmpty()) {
+         accelerators = parsedAccelerators
+       }
+diff --git a/Android/src/app/src/main/java/com/google/ai/edge/gallery/ui/llmchat/LlmChatModelHelper.kt b/Android/src/app/src/main/java/com/google/ai/edge/gallery/ui/llmchat/LlmChatModelHelper.kt
+index 36fe7c9..4d450d7 100644
+--- a/Android/src/app/src/main/java/com/google/ai/edge/gallery/ui/llmchat/LlmChatModelHelper.kt
++++ b/Android/src/app/src/main/java/com/google/ai/edge/gallery/ui/llmchat/LlmChatModelHelper.kt
+@@ -20,6 +20,7 @@ import android.content.Context
+ import android.graphics.Bitmap
+ import android.util.Log
+ import com.google.ai.edge.gallery.common.ImageUtils
++import com.google.ai.edge.gallery.common.HardwareUtils
+ import com.google.ai.edge.gallery.common.cleanUpMediapipeTaskErrorMessage
+ import com.google.ai.edge.gallery.common.metrics.InferenceStatus
+ import com.google.ai.edge.gallery.common.metrics.MetricsTracker
+@@ -269,13 +270,12 @@ object LlmChatModelHelper : LlmModelHelper {
+       ExperimentalFlags.enableBenchmark = enableBenchmark
+       ExperimentalFlags.enableSpeculativeDecoding = speculativeDecoding
+       Log.d(TAG, "Speculative decoding enabled: $speculativeDecoding")
+-      val engine = Engine(engineConfig)
+-      try {
+-        engine.initialize()
+-      } finally {
+-        ExperimentalFlags.enableSpeculativeDecoding = false
+-        ExperimentalFlags.enableBenchmark = false
+-      }
++      val engine =
++        initializeEngineWithFallback(
++          model = model,
++          engineConfig = engineConfig,
++          speculativeDecoding = speculativeDecoding,
++        )
+ 
+       val conversation =
+         try {
+@@ -303,6 +303,51 @@ object LlmChatModelHelper : LlmModelHelper {
+     return null
+   }
+ 
++  /**
++   * Creates and initializes the engine. On Exynos 2600 (Galaxy S26), the GPU backend can fail at
++   * init because Clspv (ANGLE-CL) rejects an ML Drift kernel (LiteRT-LM issue #2114); in that case
++   * fall back to CPU so the model stays usable.
++   */
++  @OptIn(ExperimentalApi::class) // opt-in experimental flags
++  private fun initializeEngineWithFallback(
++    model: Model,
++    engineConfig: EngineConfig,
++    speculativeDecoding: Boolean,
++  ): Engine {
++    try {
++      return createInitializedEngine(engineConfig, speculativeDecoding)
++    } catch (e: Exception) {
++      if (!HardwareUtils.isExynos2600() || model.currentAccelerator != Accelerator.GPU) {
++        throw e
++      }
++      Log.w(
++        TAG,
++        "GPU engine init failed on Exynos 2600 (LiteRT-LM issue #2114); falling back to CPU",
++        e,
++      )
++      return createInitializedEngine(engineConfig.copy(backend = Backend.CPU()), speculativeDecoding)
++    }
++  }
++
++  @OptIn(ExperimentalApi::class) // opt-in experimental flags
++  private fun createInitializedEngine(engineConfig: EngineConfig, speculativeDecoding: Boolean): Engine {
++    ExperimentalFlags.enableBenchmark = false
++    ExperimentalFlags.enableSpeculativeDecoding = speculativeDecoding
++    val engine = Engine(engineConfig)
++    try {
++      engine.initialize()
++    } catch (e: Exception) {
++      try {
++        engine.close()
++      } catch (_: Exception) {}
++      throw e
++    } finally {
++      ExperimentalFlags.enableSpeculativeDecoding = false
++      ExperimentalFlags.enableBenchmark = false
++    }
++    return engine
++  }
++
+   override fun resetConversation(
+     model: Model,
+     supportImage: Boolean,
