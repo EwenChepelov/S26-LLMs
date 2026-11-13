@@ -31,6 +31,7 @@ jobs:
           cd gallery
           git checkout e26a84b
           git apply "$GITHUB_WORKSPACE/gallery-exynos2600-changes.diff"
+          mkdir -p Android/src/app/src/main/jniLibs/arm64-v8a
           cp "$GITHUB_WORKSPACE/libLiteRtDispatch_Samsung.so" \
             Android/src/app/src/main/jniLibs/arm64-v8a/
 
